@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Rust / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked
+      - name: Real terminal and mouse smoke test
+        run: |
+          python3 -m venv .tools/pty-venv
+          .tools/pty-venv/bin/pip install pyte==0.8.2
+          .tools/pty-venv/bin/python scripts/pty-smoke.py target/debug/git-tui
+      - name: Build upstream Git 1.8.3.1
+        if: runner.os == 'Linux'
+        run: sh scripts/build-legacy-git.sh
+      - name: Legacy Git workflows and mouse smoke test
+        if: runner.os == 'Linux'
+        run: |
+          export GIT_TUI_TEST_GIT="$PWD/.tools/git-1.8.3.1/bin/git"
+          cargo test --locked --test git_workflows
+          .tools/pty-venv/bin/python scripts/pty-smoke.py target/debug/git-tui
+
+  centos7:
+    name: CentOS 7 / system Git / static musl
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build portable binary and integration test harness
+        run: |
+          mkdir -p .tools/centos-artifacts
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/git-tui .tools/centos-artifacts/git-tui
+          cargo test --locked --target x86_64-unknown-linux-musl --test git_workflows --no-run --message-format=json > .tools/test-build.json
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          records = [json.loads(line) for line in pathlib.Path('.tools/test-build.json').read_text().splitlines()]
+          executable = next(r['executable'] for r in records if r.get('reason') == 'compiler-artifact' and r['target']['name'] == 'git_workflows' and r.get('executable'))
+          shutil.copy2(executable, '.tools/centos-artifacts/git-workflows-tests')
+          PY
+          file .tools/centos-artifacts/git-tui
+      - name: Verify on CentOS 7 with its official yum Git package
+        run: |
+          docker build -t git-tui-centos7 -f ci/centos7.Dockerfile ci
+          docker run --rm --network none -v "$PWD/.tools/centos-artifacts:/artifacts:ro" -v "$PWD/scripts:/scripts:ro" git-tui-centos7 sh /scripts/centos7-smoke.sh
+      - name: Package verified portable binary
+        run: |
+          mkdir -p .tools/package
+          cp .tools/centos-artifacts/git-tui README.md LICENSE .tools/package/
+          tar -C .tools/package -czf git-tui-x86_64-unknown-linux-musl.tar.gz git-tui README.md LICENSE
+          sha256sum git-tui-x86_64-unknown-linux-musl.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: git-tui-x86_64-unknown-linux-musl
+          path: |
+            git-tui-x86_64-unknown-linux-musl.tar.gz
+            SHA256SUMS
+          if-no-files-found: error
