@@ -1,10 +1,26 @@
 # git-tui
 
 [![CI](https://github.com/class-undefined/git-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/class-undefined/git-tui/actions/workflows/ci.yml)
+[![Release](https://github.com/class-undefined/git-tui/actions/workflows/release.yml/badge.svg)](https://github.com/class-undefined/git-tui/actions/workflows/release.yml)
 
 使用 Rust 编写、支持鼠标操作的本地 Git 终端客户端。最低 Git 版本为 **1.8.3.1**，覆盖 CentOS 7 官方 yum 仓库的版本。
 
 项目专注本地 Git 工作流，不规划 Gitea 集成。
+
+## 运行截图
+
+文件状态与工作区差异，可点击文件、按钮和标签，使用滚轮浏览差异：
+
+![git-tui 实际运行：文件状态、暂存操作与差异预览](docs/images/files.png)
+
+<details>
+<summary>查看提交历史与提交详情截图</summary>
+
+![git-tui 实际运行：提交历史和提交差异](docs/images/history.png)
+
+</details>
+
+截图来自程序在 120 × 34 PTY 中操作演示仓库的真实输出，使用固定终端配色渲染；[生成方式](docs/images/README.md)可复现。
 
 ## 功能
 
@@ -21,7 +37,47 @@
 
 ## 安装与运行
 
-开发工具链固定为 Rust 1.94.1；Git 运行时版本与 Rust 构建工具链是两个独立要求。Linux 和 macOS 为支持平台。
+### 支持平台
+
+| 系统 | 架构 | 安装包目标 |
+| --- | --- | --- |
+| macOS 11+ | Apple Silicon / ARM64 | `aarch64-apple-darwin` |
+| Linux，包括 CentOS 7 | x86_64 | `x86_64-unknown-linux-musl` |
+| Linux | ARM64 / aarch64 | `aarch64-unknown-linux-musl` |
+
+Linux 安装包为静态 musl 二进制，不依赖目标机的 glibc 版本。所有平台运行时均需要 Git ≥ 1.8.3.1；预编译安装包不需要 Rust。验证环境与边界见 [兼容性说明](docs/compatibility.md)。
+
+### 预编译安装包
+
+版本标签发布后，[GitHub Releases](https://github.com/class-undefined/git-tui/releases) 会自动提供三个平台的 tar.gz、`SHA256SUMS` 和更新说明。可直接下载适合本机的安装包；下面用 `gh` 下载全部附件并校验，以 macOS ARM64 解压为例：
+
+```sh
+# 将 v0.1.0 替换为实际发布的版本
+gh release download v0.1.0 --repo class-undefined/git-tui \
+  --pattern '*.tar.gz' --pattern SHA256SUMS
+shasum -a 256 -c SHA256SUMS          # Linux 也可用 sha256sum -c SHA256SUMS
+tar -xzf git-tui-v0.1.0-aarch64-apple-darwin.tar.gz
+mkdir -p "$HOME/.local/bin"
+install -m 755 git-tui "$HOME/.local/bin/git-tui"
+"$HOME/.local/bin/git-tui" /path/to/repository
+```
+
+Linux 请按上表选择对应架构的压缩包。将 `~/.local/bin` 加入 `PATH` 后，可以直接执行 `git-tui`。
+
+尚未打版本标签时，可从成功的 [CI](https://github.com/class-undefined/git-tui/actions/workflows/ci.yml) 下载 `package-<target>` artifact，例如：
+
+```sh
+gh run download <run-id> --repo class-undefined/git-tui \
+  --name package-aarch64-apple-darwin --dir git-tui-package
+cd git-tui-package
+shasum -a 256 -c *.sha256
+tar -xzf git-tui-v0.1.0-aarch64-apple-darwin.tar.gz
+./git-tui --check /path/to/repository
+```
+
+### 从源码安装
+
+开发工具链固定为 Rust 1.94.1；Git 运行时版本与 Rust 构建工具链是两个独立要求。
 
 ```sh
 cargo install --git https://github.com/class-undefined/git-tui --locked
@@ -46,19 +102,7 @@ git-tui --help
 
 ### CentOS 7
 
-在现代 Linux 构建主机上生成 `x86_64-unknown-linux-musl` 静态二进制，再复制到 CentOS 7，不要求在 CentOS 7 安装现代 Rust，也不要求升级其系统 Git。
-
-每次成功的 [CI](https://github.com/class-undefined/git-tui/actions/workflows/ci.yml) 会提供 `git-tui-x86_64-unknown-linux-musl` artifact，内含 tar.gz 与 SHA256SUMS。可在已登录 `gh` 的电脑上下载指定成功运行的 artifact：
-
-```sh
-gh run download <run-id> --repo class-undefined/git-tui \
-  --name git-tui-x86_64-unknown-linux-musl
-sha256sum -c SHA256SUMS
-tar -xzf git-tui-x86_64-unknown-linux-musl.tar.gz
-./git-tui --check /path/to/repository
-```
-
-详细构建方式、命令兼容表与验证边界见 [兼容性说明](docs/compatibility.md)。
+下载 `x86_64-unknown-linux-musl` 安装包并复制到 CentOS 7，继续使用 yum 提供的 Git 即可，不要求在目标机安装现代 Rust 或升级系统 Git。CI 会把同一个发布二进制放入 CentOS 7 容器，配合官方 yum Git 1.8.3.1 运行集成测试。
 
 ## 操作
 
@@ -102,7 +146,9 @@ cargo run -- --help
 
 架构与设计约束见 [架构说明](docs/architecture.md)，贡献约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-CI 覆盖 Linux / macOS 的 Rust 检查与 PTY 测试、上游 Git 1.8.3.1 工作流，以及 CentOS 7 容器内官方 yum Git 包与静态 musl 二进制的集成测试。
+CI 在 macOS ARM64、Linux x86_64 和 Linux ARM64 原生 runner 上构建、运行测试，并使用最终 release 二进制执行 PTY 鼠标测试；另覆盖上游 Git 1.8.3.1 和 CentOS 7 官方 yum Git。
+
+推送与 `Cargo.toml` 版本一致的 `v*` 标签会自动发布；手动运行 Release workflow 可完整演练而不发布。流程、版本规则和失败恢复见 [发布说明](docs/releasing.md)。
 
 ## 参考
 

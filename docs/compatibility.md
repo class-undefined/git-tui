@@ -2,6 +2,18 @@
 
 最低 Git 版本为 **1.8.3.1**。CentOS 7 官方 base/updates 仓库提供该版本系列，包括最终更新 `git-1.8.3.1-25.el7_9`。来源：[CentOS 官方归档](https://vault.centos.org/centos/7/updates/x86_64/Packages/)、[CentOS 源码归档标签](https://gitlab.com/CentOS/archives/git.centos.org/rpms/git/-/tags/imports%2Fc7%2Fgit-1.8.3.1-25.el7_9)。
 
+## 系统与架构
+
+| 目标 | 构建策略 | 实际 CI 运行环境 |
+| --- | --- | --- |
+| macOS ARM64 | `aarch64-apple-darwin`，`MACOSX_DEPLOYMENT_TARGET=11.0` | macOS 15 Apple Silicon |
+| Linux x86_64 | `x86_64-unknown-linux-musl`，静态链接 | Ubuntu 24.04、CentOS 7.9.2009 容器 |
+| Linux ARM64 | `aarch64-unknown-linux-musl`，静态链接 | Ubuntu 24.04 ARM64 |
+
+macOS 最低部署目标为 11.0，但 CI 只实际运行在 macOS 15；未声称每个 macOS 次版本都经过测试。macOS 产物没有 Developer ID 签名或 Apple 公证。Linux 两种架构均原生构建与测试，不依赖模拟器；CI 检查 ELF 没有动态解释器或共享库依赖。预编译产物无需 Rust，仍需要系统 Git 和支持 TUI 的终端。
+
+GitHub runner 架构依据：[GitHub 官方 runner 列表](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。打包、校验和自动发布见 [发布说明](releasing.md)。Windows 和 macOS Intel 暂无官方安装包或 CI 保证。
+
 ## 命令约束
 
 | 功能 | 实际接口 |
@@ -42,7 +54,7 @@ file target/x86_64-unknown-linux-musl/release/git-tui
 
 把生成的 `git-tui` 复制到目标机即可，运行时继续调用目标机已有 Git。普通 `x86_64-unknown-linux-gnu` 构建可能依赖构建机较新的 glibc，不应当作 CentOS 7 可移植产物分发。
 
-验证边界：容器检查 CentOS 7 用户空间、glibc 环境和 yum Git，使用宿主机内核；它不等同于在每一种真实 CentOS 7 / 3.10 内核主机上验证。首版分发目标为 Linux x86_64 musl；macOS 可从源码构建。Windows 暂不支持。
+验证边界：容器检查 CentOS 7 用户空间、glibc 环境和 yum Git，使用宿主机内核；它不等同于在每一种真实 CentOS 7 / 3.10 内核主机上验证。CentOS 7 的系统包验证覆盖 x86_64；ARM64 静态产物在 Ubuntu ARM64 上验证，不代表验证过 CentOS 7 ARM64。
 
 ## 回归场景
 
