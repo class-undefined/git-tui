@@ -36,9 +36,34 @@ pub struct Commit {
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub head: String,
+    pub head_state: HeadState,
     pub files: Vec<FileStatus>,
     pub branches: Vec<Branch>,
     pub commits: Vec<Commit>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HeadState {
+    #[default]
+    Branch,
+    Unborn,
+    Detached,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewKind {
+    Diff,
+    UntrackedText,
+    UntrackedBinary,
+    UntrackedSymlink,
+}
+
+/// Repository data without translated UI labels or empty-state messages.
+#[derive(Clone, Debug)]
+pub struct Preview {
+    pub text: String,
+    pub kind: PreviewKind,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -169,14 +194,11 @@ impl Repository {
         let has_head = self.has_head()?;
         let head = match head_ref.as_deref() {
             Some(name) => display_bytes(name.strip_prefix(b"refs/heads/").unwrap_or(name)),
-            None => format!(
-                "detached {}",
-                display_bytes(&self.bytes(&[
-                    "rev-parse".as_ref(),
-                    "--short".as_ref(),
-                    "HEAD".as_ref()
-                ])?)
-            ),
+            None => display_bytes(&self.bytes(&[
+                "rev-parse".as_ref(),
+                "--short".as_ref(),
+                "HEAD".as_ref(),
+            ])?),
         };
         let branches = self
             .bytes(&[
@@ -220,10 +242,13 @@ impl Repository {
             Vec::new()
         };
         Ok(Snapshot {
-            head: if has_head {
-                head
+            head,
+            head_state: if !has_head {
+                HeadState::Unborn
+            } else if head_ref.is_none() {
+                HeadState::Detached
             } else {
-                format!("{head} (no commits)")
+                HeadState::Branch
             },
             files,
             branches,
@@ -231,16 +256,17 @@ impl Repository {
         })
     }
 
-    pub fn diff(&self, file: &FileStatus, mode: DiffMode) -> Result<String> {
+    pub fn diff(&self, file: &FileStatus, mode: DiffMode) -> Result<Preview> {
         if file.is_untracked() && mode == DiffMode::Worktree {
             let path = self.root.join(&file.path);
             let metadata =
                 fs::symlink_metadata(&path).context("could not inspect untracked path")?;
             if metadata.file_type().is_symlink() {
-                return Ok(format!(
-                    "Untracked symlink -> {}",
-                    display_path(&fs::read_link(path)?)
-                ));
+                return Ok(Preview {
+                    text: display_path(&fs::read_link(path)?),
+                    kind: PreviewKind::UntrackedSymlink,
+                    truncated: false,
+                });
             }
             ensure!(
                 metadata.is_file(),
@@ -253,17 +279,17 @@ impl Repository {
             let truncated = bytes.len() > 256 * 1024;
             bytes.truncate(256 * 1024);
             if bytes.contains(&0) {
-                return Ok("Untracked binary file (preview omitted)".to_owned());
+                return Ok(Preview {
+                    text: String::new(),
+                    kind: PreviewKind::UntrackedBinary,
+                    truncated,
+                });
             }
-            return Ok(format!(
-                "Untracked file\n{}{}",
-                display_multiline(&bytes),
-                if truncated {
-                    "\n[preview truncated]"
-                } else {
-                    ""
-                }
-            ));
+            return Ok(Preview {
+                text: display_multiline(&bytes),
+                kind: PreviewKind::UntrackedText,
+                truncated,
+            });
         }
         let path = Path::new(".").join(&file.path);
         let original_path = file.original_path.as_ref().map(|p| Path::new(".").join(p));
@@ -283,7 +309,7 @@ impl Repository {
         self.preview(&args)
     }
 
-    pub fn show(&self, id: &str) -> Result<String> {
+    pub fn show(&self, id: &str) -> Result<Preview> {
         ensure!(
             (id.len() == 40 || id.len() == 64) && id.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid commit ID"
@@ -301,24 +327,21 @@ impl Repository {
         ])
     }
 
-    fn preview(&self, args: &[&OsStr]) -> Result<String> {
+    fn preview(&self, args: &[&OsStr]) -> Result<Preview> {
         let output = self.output(args)?;
         ensure!(
             output.status.success(),
             "Git preview failed: {}",
             display_bytes(&output.stderr)
         );
-        let mut text = display_multiline(&output.stdout);
-        if output.truncated {
-            text.push_str("\n[preview truncated at 2 MiB]");
-        }
-        if text.is_empty() {
-            text.push_str("No changes in this view. Press d to switch worktree / staged diff.");
-        }
-        Ok(text)
+        Ok(Preview {
+            text: display_multiline(&output.stdout),
+            kind: PreviewKind::Diff,
+            truncated: output.truncated,
+        })
     }
 
-    pub fn apply(&self, mutation: &Mutation) -> Result<String> {
+    pub fn apply(&self, mutation: &Mutation) -> Result<()> {
         match mutation {
             Mutation::Stage(file) => {
                 // Git 1.8.3.1 still parses a leading colon with --literal-pathspecs.
@@ -337,7 +360,7 @@ impl Repository {
                     args.push(original.as_os_str());
                 }
                 self.bytes(&args)?;
-                Ok(format!("Staged {}", display_path(&file.path)))
+                Ok(())
             }
             Mutation::Unstage(file) => {
                 let path = Path::new(".").join(&file.path);
@@ -363,10 +386,7 @@ impl Repository {
                     args.push(original.as_os_str());
                 }
                 self.bytes(&args)?;
-                Ok(format!(
-                    "Unstaged {} (worktree kept)",
-                    display_path(&file.path)
-                ))
+                Ok(())
             }
             Mutation::Commit(message) => {
                 ensure!(
@@ -374,7 +394,7 @@ impl Repository {
                     "commit message must not be empty"
                 );
                 self.bytes(&["commit".as_ref(), "-m".as_ref(), message.as_ref()])?;
-                Ok("Commit created".to_owned())
+                Ok(())
             }
             Mutation::Checkout(name) => {
                 self.bytes(&["check-ref-format".as_ref(), "--branch".as_ref(), name])?;
@@ -382,7 +402,7 @@ impl Repository {
                 full.push(name);
                 self.bytes(&["show-ref".as_ref(), "--verify".as_ref(), full.as_os_str()])?;
                 self.bytes(&["checkout".as_ref(), name, "--".as_ref()])?;
-                Ok(format!("Switched to {}", display_bytes(name.as_bytes())))
+                Ok(())
             }
             Mutation::CreateBranch(name) => {
                 ensure!(
@@ -395,7 +415,7 @@ impl Repository {
                     name.as_ref(),
                 ])?;
                 self.bytes(&["checkout".as_ref(), "-b".as_ref(), name.as_ref()])?;
-                Ok(format!("Created branch {name}"))
+                Ok(())
             }
         }
     }

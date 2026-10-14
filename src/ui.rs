@@ -9,15 +9,17 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{Action, App, Focus, HitRegions, InputKind, Modal, View};
+use crate::i18n::{self, Language, Text};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 
 pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    let language = app.language;
     app.hits = HitRegions::default();
     if area.width < 60 || area.height < 16 {
-        frame.render_widget(Paragraph::new("git-tui\nTerminal too small: need 60 columns × 16 rows.\nResize, or Esc then q to quit."), area);
+        frame.render_widget(Paragraph::new(language.text(Text::SmallTerminal)), area);
         return;
     }
     let [header, tabs, actions, body, status, footer] = Layout::vertical([
@@ -43,7 +45,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
             ]),
             Line::from(vec![
                 Span::styled(
-                    format!(" {}", app.snapshot.head),
+                    format!(" {}", i18n::head(&app.snapshot, language)),
                     Style::default().fg(Color::Green),
                 ),
                 Span::styled(
@@ -51,7 +53,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
                         "  •  {}{}",
                         app.version,
                         if app.is_busy() {
-                            "  •  working…"
+                            language.text(Text::Working)
                         } else {
                             ""
                         }
@@ -64,9 +66,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     );
     let mut x = tabs.x;
     for (label, view) in [
-        ("1 Files", View::Files),
-        ("2 Branches", View::Branches),
-        ("3 Log", View::Log),
+        (language.text(Text::FilesTab), View::Files),
+        (language.text(Text::BranchesTab), View::Branches),
+        (language.text(Text::LogTab), View::Log),
     ] {
         let rect = Rect::new(x, tabs.y, 15.min(tabs.right().saturating_sub(x)), 1);
         let style = if app.view == view {
@@ -83,21 +85,22 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     }
     let mut buttons = match app.view {
         View::Files => vec![
-            ("s Stage", Action::Stage),
-            ("u Unstage", Action::Unstage),
-            ("c Commit", Action::Commit),
-            ("d Diff", Action::ToggleDiff),
+            (language.text(Text::StageButton), Action::Stage),
+            (language.text(Text::UnstageButton), Action::Unstage),
+            (language.text(Text::CommitButton), Action::Commit),
+            (language.text(Text::DiffButton), Action::ToggleDiff),
         ],
         View::Branches => vec![
-            ("Enter Switch", Action::Checkout),
-            ("n New", Action::NewBranch),
+            (language.text(Text::SwitchButton), Action::Checkout),
+            (language.text(Text::NewButton), Action::NewBranch),
         ],
         View::Log => vec![],
     };
     buttons.extend([
-        ("r Refresh", Action::Refresh),
-        ("? Help", Action::Help),
-        ("q Quit", Action::Quit),
+        (language.text(Text::RefreshButton), Action::Refresh),
+        (language.text(Text::LanguageButton), Action::Language),
+        (language.text(Text::HelpButton), Action::Help),
+        (language.text(Text::QuitButton), Action::Quit),
     ]);
     app.hits
         .buttons
@@ -108,9 +111,22 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
     };
     let title = match app.view {
-        View::Files => format!(" Files ({})  X=index Y=worktree ", app.snapshot.files.len()),
-        View::Branches => format!(" Local branches ({}) ", app.snapshot.branches.len()),
-        View::Log => format!(" History ({}/100) ", app.snapshot.commits.len()),
+        View::Files => format!(
+            " {} ({})  {} ",
+            language.text(Text::Files),
+            app.snapshot.files.len(),
+            language.text(Text::IndexLegend)
+        ),
+        View::Branches => format!(
+            " {} ({}) ",
+            language.text(Text::Branches),
+            app.snapshot.branches.len()
+        ),
+        View::Log => format!(
+            " {} ({}/100) ",
+            language.text(Text::History),
+            app.snapshot.commits.len()
+        ),
     };
     let list_block = pane(title, app.focus == Focus::List);
     app.hits.list = list_block.inner(list_area);
@@ -180,11 +196,11 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     );
     let title = match app.view {
         View::Files => match app.diff_mode {
-            DiffMode::Worktree => " Worktree diff · d: staged ",
-            DiffMode::Staged => " Staged diff · d: worktree ",
+            DiffMode::Worktree => language.text(Text::WorktreeDiff),
+            DiffMode::Staged => language.text(Text::StagedDiff),
         },
-        View::Branches => " Branch actions ",
-        View::Log => " Commit details ",
+        View::Branches => language.text(Text::BranchActions),
+        View::Log => language.text(Text::CommitDetails),
     };
     let preview_block = pane(title.to_owned(), app.focus == Focus::Preview);
     app.hits.preview = preview_block.inner(preview_area);
@@ -230,7 +246,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         preview_area,
     );
     frame.render_widget(
-        Paragraph::new(app.message.as_str())
+        Paragraph::new(app.message.render(language))
             .style(Style::default().fg(if app.is_error {
                 Color::Red
             } else {
@@ -240,8 +256,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         status,
     );
     frame.render_widget(
-        Paragraph::new(" Click: select/action  Wheel: scroll  Tab: focus  1/2/3: views  ?: help")
-            .style(Style::default().fg(MUTED)),
+        Paragraph::new(language.text(Text::Footer)).style(Style::default().fg(MUTED)),
         footer,
     );
     if app.modal.is_some() {
@@ -282,9 +297,10 @@ fn button_row(frame: &mut Frame, area: Rect, buttons: &[(&str, Action)]) -> Vec<
 
 fn modal(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    let language = app.language;
     let width = area.width.saturating_sub(6).min(76);
     let height = if matches!(app.modal, Some(Modal::Help)) {
-        21
+        22
     } else {
         9
     }
@@ -303,13 +319,14 @@ fn modal(frame: &mut Frame, app: &mut App) {
         Modal::Input {
             kind: InputKind::Commit,
             ..
-        } => " Commit staged changes ",
+        } => language.text(Text::CommitTitle),
         Modal::Input {
             kind: InputKind::Branch,
             ..
-        } => " Create and switch branch ",
-        Modal::Checkout(_) => " Switch branch ",
-        Modal::Help => " Keyboard & mouse ",
+        } => language.text(Text::BranchTitle),
+        Modal::Checkout(_) => language.text(Text::CheckoutTitle),
+        Modal::Help => language.text(Text::HelpTitle),
+        Modal::Language { .. } => language.text(Text::LanguageTitle),
     };
     let block = pane(title.to_owned(), true);
     let inner = block.inner(rect);
@@ -323,8 +340,8 @@ fn modal(frame: &mut Frame, app: &mut App) {
     match modal {
         Modal::Input { kind, text } => {
             let label = match kind {
-                InputKind::Commit => "Commit summary (staged changes only):",
-                InputKind::Branch => "New branch name:",
+                InputKind::Commit => language.text(Text::CommitPrompt),
+                InputKind::Branch => language.text(Text::BranchPrompt),
             };
             let visible = input_tail(text, content.width.saturating_sub(2) as usize);
             frame.render_widget(
@@ -333,20 +350,47 @@ fn modal(frame: &mut Frame, app: &mut App) {
                     Line::raw(""),
                     Line::styled(format!("> {visible}"), Style::default().fg(ACCENT)),
                     Line::raw(""),
-                    Line::styled(
-                        "Enter: submit   Esc: cancel   Backspace: delete",
-                        Style::default().fg(MUTED),
-                    ),
+                    Line::styled(language.text(Text::InputHint), Style::default().fg(MUTED)),
                 ]),
                 content,
             );
             frame.set_cursor_position((content.x + 2 + visible.width() as u16, content.y + 2));
         }
         Modal::Checkout(name) => {
-            frame.render_widget(Paragraph::new(format!("Switch to {}?\n\nUncommitted changes are kept when Git can carry them safely; conflicting changes block checkout.", App::branch_label(name))).wrap(Wrap { trim: false }), content);
+            let prompt = match language {
+                Language::En => format!("Switch to {}?", App::branch_label(name)),
+                Language::Zh => format!("切换到 {}？", App::branch_label(name)),
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{prompt}\n\n{}", language.text(Text::CheckoutHint)))
+                    .wrap(Wrap { trim: false }),
+                content,
+            );
         }
         Modal::Help => {
-            frame.render_widget(Paragraph::new("1 / 2 / 3     Files / branches / history\nj / k or ↑/↓  Move selection / scroll preview\nTab or h / l  Focus list / preview\nH / L         Scroll preview horizontally\nPgUp / PgDn   Move ten rows\ns or Space    Stage selected file\nu             Unstage (keep worktree)\nd             Worktree / staged diff\nc             Commit staged changes\nn             Create and switch branch\nEnter         Switch branch / focus preview\nr             Refresh (also every 3 seconds)\nq / Ctrl-C    Quit when no mutation is running\n\nMouse: click tabs, rows and buttons; wheel over\na pane scrolls it. Esc closes dialogs."), content);
+            frame.render_widget(Paragraph::new(language.text(Text::Help)), content);
+        }
+        Modal::Language { selected } => {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} {}",
+                    language.text(Text::SelectedLanguage),
+                    selected.name()
+                )),
+                content,
+            );
+            app.hits.modal_buttons.extend(button_row(
+                frame,
+                Rect::new(content.x, content.y + 1, content.width, 1),
+                &[
+                    ("1 English", Action::ChooseLanguage(Language::En)),
+                    ("2 中文", Action::ChooseLanguage(Language::Zh)),
+                ],
+            ));
+            frame.render_widget(
+                Paragraph::new(language.text(Text::LanguageHint)).wrap(Wrap { trim: false }),
+                Rect::new(content.x, content.y + 3, content.width, 2),
+            );
         }
     }
     let button_area = Rect::new(
@@ -356,11 +400,16 @@ fn modal(frame: &mut Frame, app: &mut App) {
         1,
     );
     let buttons = if matches!(modal, Modal::Help) {
-        vec![("Close", Action::Cancel)]
+        vec![(language.text(Text::Close), Action::Cancel)]
     } else {
-        vec![("Confirm", Action::Confirm), ("Cancel", Action::Cancel)]
+        vec![
+            (language.text(Text::Confirm), Action::Confirm),
+            (language.text(Text::Cancel), Action::Cancel),
+        ]
     };
-    app.hits.modal_buttons = button_row(frame, button_area, &buttons);
+    app.hits
+        .modal_buttons
+        .extend(button_row(frame, button_area, &buttons));
 }
 
 fn input_tail(text: &str, max_width: usize) -> &str {

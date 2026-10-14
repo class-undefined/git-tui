@@ -9,6 +9,7 @@ use ratatui::{layout::Rect, widgets::ListState};
 use std::os::unix::ffi::OsStrExt;
 use unicode_width::UnicodeWidthStr;
 
+use crate::i18n::{Language, Message, PreviewContent, Text};
 use crate::worker::{PreviewTarget, Request, Response};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -47,6 +48,7 @@ pub(crate) enum Modal {
     Input { kind: InputKind, text: String },
     Checkout(OsString),
     Help,
+    Language { selected: Language },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +67,8 @@ pub(crate) enum Action {
     ToggleDiff,
     Refresh,
     Help,
+    Language,
+    ChooseLanguage(Language),
     Confirm,
     Cancel,
     Quit,
@@ -82,6 +86,7 @@ pub(crate) struct HitRegions {
 enum Busy {
     Read,
     Mutation,
+    Settings,
 }
 
 pub(crate) struct App {
@@ -93,7 +98,8 @@ pub(crate) struct App {
     pub preview: String,
     pub preview_scroll: u16,
     pub preview_column: u16,
-    pub message: String,
+    pub message: Message,
+    pub language: Language,
     pub is_error: bool,
     pub modal: Option<Modal>,
     pub hits: HitRegions,
@@ -107,20 +113,23 @@ pub(crate) struct App {
     refresh_pending: bool,
     preview_pending: bool,
     generation: u64,
+    preview_content: PreviewContent,
+    pending_language: Option<Language>,
 }
 
 impl App {
-    pub(crate) fn new(repository_label: String, version: String) -> Self {
+    pub(crate) fn new(repository_label: String, version: String, language: Language) -> Self {
         Self {
             snapshot: Snapshot::default(),
             view: View::Files,
             focus: Focus::List,
             lists: std::array::from_fn(|_| ListState::default()),
             diff_mode: DiffMode::Worktree,
-            preview: "Loading repository…".to_owned(),
+            preview: language.text(Text::LoadingRepository).to_owned(),
             preview_scroll: 0,
             preview_column: 0,
-            message: "Click a file or use ↑/↓. Press ? for help.".to_owned(),
+            message: Text::Welcome.into(),
+            language,
             is_error: false,
             modal: None,
             hits: HitRegions::default(),
@@ -134,11 +143,13 @@ impl App {
             refresh_pending: true,
             preview_pending: false,
             generation: 0,
+            preview_content: PreviewContent::Text(Text::LoadingRepository),
+            pending_language: None,
         }
     }
 
     pub(crate) fn is_busy(&self) -> bool {
-        self.busy.is_some() || self.pending_mutation.is_some()
+        self.busy.is_some() || self.pending_mutation.is_some() || self.pending_language.is_some()
     }
 
     pub(crate) fn selected(&self) -> Option<usize> {
@@ -180,14 +191,31 @@ impl App {
         self.preview_scroll = 0;
         self.preview_column = 0;
         self.preview_pending = self.target().is_some();
-        self.preview = if self.preview_pending { "Loading preview…" } else {
+        let text = if self.preview_pending {
+            Text::LoadingPreview
+        } else {
             match self.view {
-                View::Files => "Working tree clean.\n\nChanges appear here automatically; press r to refresh.",
-                View::Branches => "Local branches\n\nSelect a branch and choose Switch (Enter).\nChoose New (n) to create and switch to a branch.\n\nGit protects uncommitted changes during checkout.",
-                View::Log => "No commits yet. Stage a file and create your first commit.",
+                View::Files => Text::CleanWorktree,
+                View::Branches => Text::BranchGuide,
+                View::Log => Text::NoCommits,
             }
-        }.to_owned();
+        };
+        self.set_preview(PreviewContent::Text(text));
         self.dirty = true;
+    }
+
+    fn set_preview(&mut self, content: PreviewContent) {
+        // Render only when data or language changes, never for every scroll frame.
+        self.preview = content.render(self.language);
+        self.preview_content = content;
+    }
+
+    fn set_language(&mut self, language: Language) {
+        self.language = language;
+        self.preview = self.preview_content.render(language);
+        self.pending_language = Some(language);
+        self.hits = HitRegions::default();
+        self.notice(Text::SavingLanguage);
     }
 
     pub(crate) fn next_request(&mut self) -> Option<Request> {
@@ -198,6 +226,9 @@ impl App {
             self.busy = Some(Busy::Mutation);
             self.refresh_pending = false;
             Request::Mutate(mutation)
+        } else if let Some(language) = self.pending_language.take() {
+            self.busy = Some(Busy::Settings);
+            Request::SaveLanguage(language)
         } else if self.refresh_pending {
             self.refresh_pending = false;
             self.busy = Some(Busy::Read);
@@ -224,9 +255,8 @@ impl App {
             Response::Refreshed(result) => match result {
                 Ok(snapshot) => self.replace_snapshot(snapshot),
                 Err(error) => {
-                    self.error(error);
-                    self.preview =
-                        "Repository could not be refreshed. Press r to retry.".to_owned();
+                    self.error(Message::Detail(Text::RefreshFailed, error));
+                    self.set_preview(PreviewContent::Text(Text::RefreshRetry));
                 }
             },
             Response::Preview {
@@ -235,13 +265,17 @@ impl App {
                 result,
             } => {
                 if generation == self.generation && self.target().as_ref() == Some(&target) {
-                    self.preview = match result {
-                        Ok(body) => body,
-                        Err(error) => format!("Preview failed:\n{error}"),
-                    };
+                    self.set_preview(match result {
+                        Ok(body) => PreviewContent::Repository(body),
+                        Err(error) => PreviewContent::Error(error),
+                    });
                 }
             }
-            Response::Mutated { outcome, snapshot } => {
+            Response::Mutated {
+                mutation,
+                outcome,
+                snapshot,
+            } => {
                 let refresh_error = match snapshot {
                     Ok(snapshot) => {
                         self.replace_snapshot(snapshot);
@@ -250,19 +284,35 @@ impl App {
                     Err(error) => Some(error),
                 };
                 match outcome {
-                    Ok(message) => {
+                    Ok(()) => {
                         self.submitted_input = None;
-                        self.notice(message);
+                        self.notice(Message::Mutation(mutation));
                     }
                     Err(error) => {
                         if let Some((kind, text)) = self.submitted_input.take() {
                             self.modal = Some(Modal::Input { kind, text });
                         }
-                        self.error(error);
+                        self.error(Message::Detail(Text::GitFailed, error));
                     }
                 }
                 if let Some(error) = refresh_error {
-                    self.error(format!("{}; refresh failed: {error}", self.message));
+                    let previous = std::mem::replace(&mut self.message, Text::Welcome.into());
+                    self.error(Message::RefreshAfter(Box::new(previous), error));
+                }
+            }
+            Response::LanguageSaved { language, result } => {
+                // An earlier save must not overwrite a more recent selection.
+                if self.pending_language.is_none() && self.language == language {
+                    match result {
+                        Ok(()) => self.notice(Message::Detail(
+                            Text::LanguageSaved,
+                            language.name().to_owned(),
+                        )),
+                        Err(error) => self.error(Message::Detail(
+                            Text::LanguageSaveFailed,
+                            display_bytes(error.as_bytes()),
+                        )),
+                    }
                 }
             }
         }
@@ -322,44 +372,44 @@ impl App {
         }
     }
 
-    pub(crate) fn notice(&mut self, message: String) {
-        self.message = message;
+    pub(crate) fn notice(&mut self, message: impl Into<Message>) {
+        self.message = message.into();
         self.is_error = false;
         self.dirty = true;
     }
-    fn error(&mut self, message: String) {
-        self.message = message;
+    pub(crate) fn error(&mut self, message: impl Into<Message>) {
+        self.message = message.into();
         self.is_error = true;
         self.dirty = true;
     }
 
     fn queue(&mut self, mutation: Mutation) {
         if self.busy == Some(Busy::Mutation) || self.pending_mutation.is_some() {
-            self.notice("A Git operation is already running.".to_owned());
+            self.notice(Text::AlreadyRunning);
             return;
         }
         self.pending_mutation = Some(mutation);
-        self.notice("Running Git operation…".to_owned());
+        self.notice(Text::RunningGit);
     }
 
     pub(crate) fn act(&mut self, action: Action) {
         self.dirty = true;
+        let submits_mutation = matches!(
+            action,
+            Action::Stage | Action::Unstage | Action::Commit | Action::NewBranch | Action::Checkout
+        ) || action == Action::Confirm
+            && matches!(self.modal, Some(Modal::Input { .. } | Modal::Checkout(_)));
         if (self.busy == Some(Busy::Mutation) || self.pending_mutation.is_some())
-            && matches!(
-                action,
-                Action::Stage
-                    | Action::Unstage
-                    | Action::Commit
-                    | Action::NewBranch
-                    | Action::Checkout
-                    | Action::Confirm
-            )
+            && submits_mutation
         {
-            self.notice("A Git operation is already running.".to_owned());
+            self.notice(Text::AlreadyRunning);
             return;
         }
         if self.modal.is_some()
-            && !matches!(action, Action::Confirm | Action::Cancel | Action::Quit)
+            && !matches!(
+                action,
+                Action::Confirm | Action::Cancel | Action::Quit | Action::ChooseLanguage(_)
+            )
         {
             return;
         }
@@ -425,7 +475,7 @@ impl App {
                     } else if file.is_staged() || file.is_conflicted() {
                         self.queue(Mutation::Unstage(file));
                     } else {
-                        self.notice("This file has no staged changes.".to_owned());
+                        self.notice(Text::NoStagedChanges);
                     }
                 }
             }
@@ -447,7 +497,7 @@ impl App {
                         self.selected().and_then(|i| self.snapshot.branches.get(i))
                 {
                     if branch.current {
-                        self.notice("Already on this branch.".to_owned());
+                        self.notice(Text::CurrentBranch);
                     } else {
                         self.modal = Some(Modal::Checkout(branch.name.clone()));
                     }
@@ -462,10 +512,20 @@ impl App {
             }
             Action::Refresh => self.request_refresh(),
             Action::Help => self.modal = Some(Modal::Help),
+            Action::Language => {
+                self.modal = Some(Modal::Language {
+                    selected: self.language,
+                })
+            }
+            Action::ChooseLanguage(language) => {
+                if let Some(Modal::Language { selected }) = &mut self.modal {
+                    *selected = language;
+                }
+            }
             Action::Confirm => match self.modal.take() {
                 Some(Modal::Input { kind, text }) if text.trim().is_empty() => {
                     self.modal = Some(Modal::Input { kind, text });
-                    self.error("Please enter a value.".to_owned());
+                    self.error(Text::ValueRequired);
                 }
                 Some(Modal::Input { kind, text }) => {
                     self.submitted_input = Some((kind, text.clone()));
@@ -475,14 +535,16 @@ impl App {
                     });
                 }
                 Some(Modal::Checkout(name)) => self.queue(Mutation::Checkout(name)),
+                Some(Modal::Language { selected }) => self.set_language(selected),
                 Some(Modal::Help) | None => {}
             },
             Action::Cancel => self.modal = None,
             Action::Quit => {
-                if self.busy == Some(Busy::Mutation) || self.pending_mutation.is_some() {
-                    self.notice(
-                        "Waiting for the Git operation to finish; then press q.".to_owned(),
-                    );
+                if matches!(self.busy, Some(Busy::Mutation | Busy::Settings))
+                    || self.pending_mutation.is_some()
+                    || self.pending_language.is_some()
+                {
+                    self.notice(Text::WaitBeforeQuit);
                 } else {
                     self.quit = true;
                 }

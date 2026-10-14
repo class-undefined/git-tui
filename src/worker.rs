@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use git_tui::git::{DiffMode, FileStatus, Mutation, Repository, Snapshot};
+use git_tui::git::{DiffMode, FileStatus, Mutation, Preview, Repository, Snapshot};
+
+use crate::{i18n::Language, settings::Settings};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PreviewTarget {
@@ -19,6 +21,7 @@ pub(crate) enum Request {
         target: PreviewTarget,
     },
     Mutate(Mutation),
+    SaveLanguage(Language),
 }
 
 pub(crate) enum Response {
@@ -26,11 +29,16 @@ pub(crate) enum Response {
     Preview {
         generation: u64,
         target: PreviewTarget,
-        result: Result<String, String>,
+        result: Result<Preview, String>,
     },
     Mutated {
-        outcome: Result<String, String>,
+        mutation: Mutation,
+        outcome: Result<(), String>,
         snapshot: Result<Snapshot, String>,
+    },
+    LanguageSaved {
+        language: Language,
+        result: Result<(), String>,
     },
 }
 
@@ -41,7 +49,7 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn start(repo: Repository) -> Result<Self> {
+    pub(crate) fn start(repo: Repository, settings: Settings) -> Result<Self> {
         let (sender, jobs) = mpsc::sync_channel(1);
         let (results, receiver) = mpsc::sync_channel(1);
         let handle = thread::Builder::new()
@@ -68,8 +76,18 @@ impl Worker {
                             let outcome = repo.apply(&mutation).map_err(|e| format!("{e:#}"));
                             // A hook or timeout can leave a changed index even on failure.
                             let snapshot = repo.snapshot().map_err(|e| format!("{e:#}"));
-                            Response::Mutated { outcome, snapshot }
+                            Response::Mutated {
+                                mutation,
+                                outcome,
+                                snapshot,
+                            }
                         }
+                        Request::SaveLanguage(language) => Response::LanguageSaved {
+                            language,
+                            result: settings
+                                .save(language)
+                                .map_err(|error| format!("{error:#}")),
+                        },
                     };
                     if results.send(response).is_err() {
                         break;

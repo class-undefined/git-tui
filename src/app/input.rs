@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::{Action, App, Focus, HitRegions, Modal, View};
+use crate::i18n::Language;
 
 impl App {
     pub(crate) fn handle_event(&mut self, event: Event) {
@@ -43,6 +44,26 @@ impl App {
             return;
         }
         if self.modal.is_some() {
+            if let Some(Modal::Language { selected }) = self.modal {
+                let language = match key.code {
+                    KeyCode::Char('1') => Some(Language::En),
+                    KeyCode::Char('2') => Some(Language::Zh),
+                    KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Tab
+                    | KeyCode::BackTab => Some(match selected {
+                        Language::En => Language::Zh,
+                        Language::Zh => Language::En,
+                    }),
+                    _ => None,
+                };
+                if let Some(language) = language {
+                    self.act(Action::ChooseLanguage(language));
+                    return;
+                }
+            }
             match key.code {
                 KeyCode::Esc => self.act(Action::Cancel),
                 KeyCode::Enter => self.act(Action::Confirm),
@@ -98,6 +119,7 @@ impl App {
             KeyCode::Char('d') => Action::ToggleDiff,
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Char('?') => Action::Help,
+            KeyCode::F(2) => Action::Language,
             _ => return,
         };
         self.act(action);

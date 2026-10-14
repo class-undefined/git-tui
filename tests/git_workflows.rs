@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use git_tui::git::{DiffMode, FileStatus, Mutation, Repository};
+use git_tui::git::{DiffMode, FileStatus, HeadState, Mutation, PreviewKind, Repository};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -81,15 +81,19 @@ impl Fixture {
 fn unborn_stage_unstage_commit_and_log() -> Result<()> {
     let f = Fixture::new()?;
     let repo = f.repo()?;
-    assert!(repo.snapshot()?.head.contains("no commits"));
+    assert_eq!(repo.snapshot()?.head_state, HeadState::Unborn);
     assert!(repo.snapshot()?.commits.is_empty());
     f.write("first file.txt", b"hello\n")?;
     let file = f.file("first file.txt")?;
-    assert!(repo.diff(&file, DiffMode::Worktree)?.contains("hello"));
+    assert!(repo.diff(&file, DiffMode::Worktree)?.text.contains("hello"));
     repo.apply(&Mutation::Stage(file))?;
     let staged = f.file("first file.txt")?;
     assert!(staged.is_staged());
-    assert!(repo.diff(&staged, DiffMode::Staged)?.contains("+hello"));
+    assert!(
+        repo.diff(&staged, DiffMode::Staged)?
+            .text
+            .contains("+hello")
+    );
     f.write("first file.txt", b"newer worktree\n")?;
     repo.apply(&Mutation::Unstage(staged))?;
     assert!(f.file("first file.txt")?.is_untracked());
@@ -105,6 +109,7 @@ fn unborn_stage_unstage_commit_and_log() -> Result<()> {
     assert_eq!(snapshot.commits[0].summary, "first commit");
     assert!(
         repo.show(&snapshot.commits[0].id)?
+            .text
             .contains("newer worktree")
     );
     Ok(())
@@ -164,13 +169,18 @@ fn modified_and_deleted_files_preserve_worktree_on_unstage() -> Result<()> {
     f.write("tracked.txt", b"changed\n")?;
     assert!(
         repo.diff(&f.file("tracked.txt")?, DiffMode::Worktree)?
+            .text
             .contains("+changed")
     );
     repo.apply(&Mutation::Stage(f.file("tracked.txt")?))?;
     f.write("tracked.txt", b"unstaged addition\n")?;
     let file = f.file("tracked.txt")?;
     assert!(file.is_staged() && file.has_worktree_changes());
-    assert!(repo.diff(&file, DiffMode::Staged)?.contains("+changed"));
+    assert!(
+        repo.diff(&file, DiffMode::Staged)?
+            .text
+            .contains("+changed")
+    );
     repo.apply(&Mutation::Unstage(file))?;
     assert_eq!(
         fs::read(f.dir.path().join("tracked.txt"))?,
@@ -198,6 +208,7 @@ fn rename_unstages_both_paths() -> Result<()> {
     );
     assert!(
         repo.diff(&renamed, DiffMode::Staged)?
+            .text
             .contains("new name.txt")
     );
     repo.apply(&Mutation::Unstage(renamed))?;
@@ -237,7 +248,7 @@ fn branches_switch_safely_and_log_works_detached() -> Result<()> {
     assert!(repo.apply(&Mutation::Checkout("--detach".into())).is_err());
     let commit = repo.snapshot()?.commits[0].id.clone();
     f.git(&["checkout", "--detach", &commit])?;
-    assert!(repo.snapshot()?.head.starts_with("detached"));
+    assert_eq!(repo.snapshot()?.head_state, HeadState::Detached);
     Ok(())
 }
 
@@ -272,6 +283,7 @@ fn merge_conflicts_are_visible_and_can_be_staged_after_resolution() -> Result<()
     let repo = f.repo()?;
     assert!(
         repo.diff(&f.file("tracked.txt")?, DiffMode::Worktree)?
+            .text
             .contains("tracked.txt")
     );
     f.write("tracked.txt", b"resolved\n")?;
@@ -286,12 +298,13 @@ fn previews_binary_and_symlinks_without_following_targets() -> Result<()> {
     f.write("binary", b"a\0b")?;
     symlink("/does/not/exist", f.dir.path().join("link"))?;
     let repo = f.repo()?;
-    assert!(
-        repo.diff(&f.file("binary")?, DiffMode::Worktree)?
-            .contains("binary")
+    assert_eq!(
+        repo.diff(&f.file("binary")?, DiffMode::Worktree)?.kind,
+        PreviewKind::UntrackedBinary
     );
     assert!(
         repo.diff(&f.file("link")?, DiffMode::Worktree)?
+            .text
             .contains("/does/not/exist")
     );
     Ok(())
