@@ -332,6 +332,7 @@ dependencies = [
  "clap",
  "nix",
  "ratatui",
+ "signal-hook",
  "tempfile",
  "unicode-width",
 ]
