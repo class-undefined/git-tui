@@ -223,6 +223,13 @@ fn mouse_wheel_scrolls_the_hovered_pane_and_clamps() -> Result<()> {
     assert_eq!(app.preview_column, 8);
     key(&mut app, KeyCode::Char('H'));
     assert_eq!(app.preview_column, 0);
+    app.preview_column = 100;
+    app.preview = "content became shorter after refresh".to_owned();
+    draw(&mut app, 120, 30)?;
+    assert_eq!(
+        app.preview_column, 0,
+        "shorter diffs must not leave the pane blank"
+    );
     Ok(())
 }
 

@@ -195,6 +195,15 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         .saturating_sub(usize::from(app.hits.preview.height))
         .min(usize::from(u16::MAX)) as u16;
     app.preview_scroll = app.preview_scroll.min(max_scroll);
+    let max_column = app
+        .preview
+        .lines()
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(usize::from(app.hits.preview.width))
+        .min(usize::from(u16::MAX)) as u16;
+    app.preview_column = app.preview_column.min(max_column);
     // Only style visible lines; a large diff must not stall the draw loop.
     let lines: Vec<Line<'_>> = app
         .preview
