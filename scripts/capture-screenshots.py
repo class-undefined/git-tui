@@ -36,10 +36,11 @@ def color(value, default):
     return PALETTE.get(value, f"#{value}")
 
 
-def render(screen, path, font_path):
+def render(screen, path, font_path, cjk_font_path=None):
     font = ImageFont.truetype(str(font_path), 18)
     bold_path = font_path.with_name(font_path.name.replace("Regular", "Bold"))
     bold = ImageFont.truetype(str(bold_path if bold_path.exists() else font_path), 18)
+    cjk = ImageFont.truetype(str(cjk_font_path), 18) if cjk_font_path else None
     cell_width, cell_height, padding = math.ceil(font.getlength("M")), 26, 20
     background, foreground = "#1e1e2e", "#cdd6f4"
     canvas = Image.new("RGB", (screen.columns * cell_width + padding * 2,
@@ -61,7 +62,8 @@ def render(screen, path, font_path):
             cell = screen.buffer[y][x]
             fg = color(cell.bg, background) if cell.reverse else color(cell.fg, foreground)
             left, top = padding + x * cell_width, padding + y * cell_height
-            draw.text((left, top + baseline), cell.data, font=bold if cell.bold else font,
+            face = cjk if cjk and any(ord(char) >= 0x2E80 for char in cell.data) else bold if cell.bold else font
+            draw.text((left, top + baseline), cell.data, font=face,
                       fill=fg, anchor="ls")
             if cell.underscore:
                 draw.line((left, top + baseline + 2, left + cell_width - 1, top + baseline + 2), fill=fg)
@@ -137,6 +139,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--font", required=True, type=Path, help="Monospaced TrueType font")
+    parser.add_argument("--cjk-font", type=Path, help="CJK font for additional Chinese UI and settings captures")
     parser.add_argument("--output", type=Path, default=Path("docs/images"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -161,6 +164,22 @@ def main():
             terminal.wait("+pub fn status_label")
             terminal.read(timeout=0.2)
             render(terminal.screen, args.output / "history.png", args.font)
+            if args.cjk_font:
+                terminal.click("1 Files")
+                terminal.wait("Worktree diff")
+                terminal.click("src/main.rs")
+                terminal.wait('+    println!("Click a file')
+                terminal.click("[F2 Language]")
+                terminal.wait("Selected language")
+                terminal.click("[2 中文]")
+                terminal.click("[Confirm]")
+                terminal.wait("语言设置已保存")
+                terminal.read(timeout=0.2)
+                render(terminal.screen, args.output / "files-zh.png", args.font, args.cjk_font)
+                terminal.click("[F2 语言]")
+                terminal.wait("已选语言")
+                terminal.read(timeout=0.2)
+                render(terminal.screen, args.output / "language.png", args.font, args.cjk_font)
         finally:
             terminal.close()
 
