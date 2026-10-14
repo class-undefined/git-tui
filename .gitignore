@@ -1,4 +1,6 @@
 /target/
 /.tools/
 .DS_Store
+dist/
+__pycache__/
 *.swp

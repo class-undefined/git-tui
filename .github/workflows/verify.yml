@@ -1,0 +1,116 @@
+name: Verify and package
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+
+jobs:
+  platform:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            runner: macos-15
+            arch: arm64
+            target: aarch64-apple-darwin
+          - name: Linux x86_64 / CentOS 7
+            runner: ubuntu-24.04
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check native architecture and install pinned toolchain
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          rustup show
+          rustup target add "$TARGET"
+      - name: Install static Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked --target "$TARGET"
+      - run: cargo build --locked --release --target "$TARGET"
+      - name: Verify binary format and runtime
+        run: |
+          file "target/$TARGET/release/git-tui"
+          "target/$TARGET/release/git-tui" --version
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            # Reject dynamic ELF binaries, even if built with a musl target.
+            readelf -l "target/$TARGET/release/git-tui" > program-headers.txt
+            readelf -d "target/$TARGET/release/git-tui" > dynamic-section.txt
+            if grep -q INTERP program-headers.txt || grep -q NEEDED dynamic-section.txt; then
+              echo 'Expected a static binary without a dynamic loader or shared libraries.' >&2
+              exit 1
+            fi
+          else
+            lipo -verify_arch arm64 "target/$TARGET/release/git-tui"
+            otool -l "target/$TARGET/release/git-tui" | grep -A 5 LC_BUILD_VERSION
+          fi
+      - name: Real terminal and mouse smoke test on the release binary
+        run: |
+          python3 -m venv .tools/pty-venv
+          .tools/pty-venv/bin/pip install pyte==0.8.2
+          .tools/pty-venv/bin/python scripts/pty-smoke.py "target/$TARGET/release/git-tui"
+      - name: Build upstream Git 1.8.3.1
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sh scripts/build-legacy-git.sh
+      - name: Legacy Git workflows and mouse smoke test
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          export GIT_TUI_TEST_GIT="$PWD/.tools/git-1.8.3.1/bin/git"
+          cargo test --locked --target "$TARGET" --test git_workflows
+          .tools/pty-venv/bin/python scripts/pty-smoke.py "target/$TARGET/release/git-tui"
+      - name: Prepare CentOS 7 integration test harness
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          mkdir -p .tools/centos-artifacts
+          cp "target/$TARGET/release/git-tui" .tools/centos-artifacts/git-tui
+          cargo test --locked --target "$TARGET" --test git_workflows --no-run --message-format=json > .tools/test-build.json
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          records = [json.loads(line) for line in pathlib.Path('.tools/test-build.json').read_text().splitlines()]
+          executable = next(r['executable'] for r in records if r.get('reason') == 'compiler-artifact' and r['target']['name'] == 'git_workflows' and r.get('executable'))
+          shutil.copy2(executable, '.tools/centos-artifacts/git-workflows-tests')
+          PY
+      - name: Verify the release binary with CentOS 7 official yum Git
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          docker build -t git-tui-centos7 -f ci/centos7.Dockerfile ci
+          docker run --rm --network none -v "$PWD/.tools/centos-artifacts:/artifacts:ro" -v "$PWD/scripts:/scripts:ro" git-tui-centos7 sh /scripts/centos7-smoke.sh
+      - name: Test release tooling and package the verified binary
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_release.py'
+          python3 scripts/release.py package --target "$TARGET" --binary "target/$TARGET/release/git-tui" --output dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
