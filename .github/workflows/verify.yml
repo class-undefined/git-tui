@@ -70,7 +70,7 @@ jobs:
               exit 1
             fi
           else
-            lipo -verify_arch arm64 "target/$TARGET/release/git-tui"
+            lipo "target/$TARGET/release/git-tui" -verify_arch arm64
             otool -l "target/$TARGET/release/git-tui" | grep -A 5 LC_BUILD_VERSION
           fi
       - name: Real terminal and mouse smoke test on the release binary
